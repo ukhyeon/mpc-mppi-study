@@ -1,0 +1,5 @@
+# 커널용으로 따로 설치한 패키지 (README의 "실행 환경"대로 다시 설치)
+.kernel_pkgs/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
