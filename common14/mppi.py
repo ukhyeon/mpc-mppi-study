@@ -7,7 +7,8 @@
 import numpy as np
 
 from . import scene as S
-from .geometry import segment_gaps
+from .geometry import segment_gaps, nearest
+from .mass import directional_mass, reduced_mass
 
 
 def rollout(p0, v0, U, dt=S.DT):
@@ -46,6 +47,27 @@ def human_cost_uniform(Pf, offsets, eta=S.ETA0, w=S.W_HUMAN):
     """가장 가까운 분절과의 간격에 균일 η 비용 [..., T]. offsets[T, 2]: 시점별 사람 위치(예측)."""
     g = segment_gaps(Pf, offsets).min(-1)
     return eta_cost(g, eta, w)
+
+
+def directional_eta(P, offset, eta_of_mass, reduced=False):
+    """가장 가까운 분절의 간격과, 그 분절을 충돌 방향 u로 밀 때의 질량으로 정한 η (16에서 추가).
+
+    u는 geometry.nearest의 정의(로봇 점 → 가장 가까운 분절 무게중심) 그대로다.
+    eta_of_mass: 질량 [kg] → η [m] 함수. reduced=True면 환산질량 μ(u), False면 사람 쪽 유효질량 m_h(u).
+    가장 가까운 분절이 바뀔 때와 팔의 ROM 경계(u·n = 0)에서 η가 뛴다(고치지 않음, 18에서 다룸).
+    반환: gap[...], eta[...], 분절 번호[...] (0 torso, 1 arm), u[..., 2]
+    """
+    gap, idx, u = nearest(P, offset)
+    m = np.where(idx == 0, directional_mass(u, 'torso'), directional_mass(u, 'arm'))
+    if reduced:
+        m = reduced_mass(m)
+    return gap, eta_of_mass(m), idx, u
+
+
+def human_cost_directional(Pf, offsets, eta_of_mass, reduced=False, w=S.W_HUMAN):
+    """방향별 η 사람 비용 [..., T] (16에서 추가). 간격과 η는 directional_eta와 같다."""
+    gap, eta, _, _ = directional_eta(Pf, offsets, eta_of_mass, reduced)
+    return eta_cost(gap, eta, w)
 
 
 def softmax_weights(J, beta):
@@ -111,3 +133,79 @@ def run_mpc(person, predictor='static', human_cost=human_cost_uniform, steps=S.S
 def static_person(t):
     """움직이지 않는 사람 (15~18의 기본)."""
     return np.zeros(2), np.zeros(2)
+
+
+def run_mpc_line(human_cost=human_cost_uniform, goal=S.GOAL, steps=S.STEPS, seed=0, sigma=S.SIGMA,
+                 n_iters=S.N_ITERS):
+    """서 있는 사람(기준 자세) 앞에서 x축 위로만 움직이는 1D MPC (15에서 추가).
+
+    run_mpc와 같은 루프인데 y 방향 탐색 폭을 0으로 둔다. 그러면 모든 후보의 y 입력이 0이라
+    로봇은 경로(y=0)를 벗어나지 못하고, 돌아갈 수 없으니 사람 앞에서 멈추거나 사람을 뚫고 지나간다.
+    goal: 목표점 [2], sigma: x 방향 탐색 폭 [m/s²]
+    반환 dict: traj[steps+1,2], us[steps,2], person[steps+1,2](모두 0), ess[steps]
+    """
+    rng = np.random.default_rng(seed)
+    goal = np.asarray(goal, float)
+    sig = np.array([sigma, 0.0])
+    p, v = S.START.copy(), np.zeros(2)
+    mu = np.zeros((S.T, 2))
+    offs = np.zeros((S.T, 2))
+    traj, us, ess = [p], [], []
+    for _ in range(steps):
+        def cost(U):
+            P, V = rollout(p, v, U)
+            return (goal_cost(P, V, U, goal) + human_cost(P[..., 1:, :], offs)).sum(-1)
+
+        for _ in range(n_iters):
+            mu, info = mppi_step(mu, cost, rng, sigma=sig)
+        ess.append(1.0 / np.sum(info['w'] ** 2))
+        u = mu[0]
+        p, v = p + v * S.DT + 0.5 * u * S.DT ** 2, v + u * S.DT
+        traj.append(p)
+        us.append(u)
+        mu = np.concatenate([mu[1:], mu[-1:]])
+    traj = np.array(traj)
+    return dict(traj=traj, us=np.array(us), person=np.zeros_like(traj), ess=np.array(ess))
+
+
+def run_mpc_opts(human_cost=human_cost_uniform, goal=S.GOAL, steps=S.STEPS, seed=0, sigma=S.SIGMA, beta=S.BETA,
+                 K=S.K, n_iters=S.N_ITERS, line=False, person=static_person):
+    """σ, β, K를 바꿀 수 있는 MPPI-MPC (17에서 추가). 나머지는 run_mpc(predictor='static')와 같다.
+
+    line=True면 y 방향 탐색 폭을 0으로 두어 run_mpc_line과 같은 1D 실행이 된다.
+    기본값으로 부르면 run_mpc(static) / run_mpc_line과 같은 결과를 낸다(같은 난수 순서).
+    반환 dict: traj[steps+1,2], us[steps,2], person, ess[steps](마지막 반복의 ESS),
+              ess_iters[steps, n_iters](반복마다 ESS), human_frac[steps](마지막 반복에서 사람 비용 > 0인 후보 비율),
+              J_std[steps](마지막 반복의 후보 비용 표준편차)
+    """
+    rng = np.random.default_rng(seed)
+    goal = np.asarray(goal, float)
+    sig = np.array([sigma, 0.0]) if line else sigma
+    p, v = S.START.copy(), np.zeros(2)
+    mu = np.zeros((S.T, 2))
+    traj, us, pers, ess, ess_it, hfrac, jstd = [p], [], [person(0.0)[0]], [], [], [], []
+    for s in range(steps):
+        off = person(s * S.DT)[0]
+        offs = np.repeat(off[None], S.T, 0)
+        last = {}
+
+        def cost(U):
+            P, V = rollout(p, v, U)
+            h = human_cost(P[..., 1:, :], offs).sum(-1)
+            last['h'] = h
+            return goal_cost(P, V, U, goal).sum(-1) + h
+
+        e = []
+        for _ in range(n_iters):
+            mu, info = mppi_step(mu, cost, rng, K=K, sigma=sig, beta=beta)
+            e.append(1.0 / np.sum(info['w'] ** 2))
+        ess.append(e[-1]); ess_it.append(e)
+        hfrac.append(float(np.mean(last['h'] > 0))); jstd.append(float(info['J'].std()))
+        u = mu[0]
+        p, v = p + v * S.DT + 0.5 * u * S.DT ** 2, v + u * S.DT
+        traj.append(p)
+        us.append(u)
+        pers.append(person((s + 1) * S.DT)[0])
+        mu = np.concatenate([mu[1:], mu[-1:]])
+    return dict(traj=np.array(traj), us=np.array(us), person=np.array(pers), ess=np.array(ess), ess_iters=np.array(ess_it),
+                human_frac=np.array(hfrac), J_std=np.array(jstd))
