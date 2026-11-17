@@ -16,6 +16,8 @@
 | `mass.py` | 방향 유효질량 m_h(u) = 1/(uᵀM⁻¹u) (팔은 ROM 잠금 쪽 4배), 환산질량 μ |
 | `mppi.py` | 2D 점 rollout, η 비용(08), 목표 비용, 균일 η 사람 비용, MPPI 한 번 갱신(05), 사람이 움직이는 MPC 루프(예측: 정지/등속/오라클), x축 위로만 움직이는 1D MPC 루프 `run_mpc_line`(15에서 추가), 방향별 η `directional_eta`와 그 사람 비용 `human_cost_directional`(16에서 추가), σ·β·K를 바꿀 수 있고 반복별 ESS·사람 비용 후보 비율을 기록하는 `run_mpc_opts`(17에서 추가, 기본값이면 run_mpc(정지 예측)·run_mpc_line과 같은 결과) |
 | `pose.py` | 기준 자세가 아닌 사람 자세를 새 이름으로 만드는 함수(16의 7절에서 추가): `make_pose`(몸통 위치·팔 방향·잠금 방향), 자세별 간격·가장 가까운 분절·방향 질량·η 비용, `draw_pose`. 16의 8절에서 비교용 u 정의(로봇 점 → 분절 표면의 가장 가까운 점) 함수 `pose_nearest_point`, `pose_directional_eta_point`, `pose_cost_directional_point`를 추가했다(기본 u 정의는 무게중심 방향 그대로). 기본 장면의 수치는 쓰기만 하고 바꾸지 않는다 |
+| `shapes.py` | 여러 형상의 비용 합치기(18에서 추가): `capsule`·`circle`(형상 + 그 형상의 η), `scene_shapes`(기준 자세를 형상 목록으로), `shape_gaps`, `shape_costs`, `combine_cost`(mode = 'min' 가장 가까운 형상 / 'sum' 모두 더하기 / 'max' 가장 큰 비용). 기본값(`scene_shapes()`, 'min')이면 human_cost_uniform과 같다 |
+| `trace.py` | 후보 단위 기록 MPPI-MPC `run_mpc_trace`(18에서 추가): run_mpc_opts(line=False)와 같은 계산·같은 난수 순서이고, 반복마다 on_iter(step, it, p, v, Pf, U, J, w, h)로 후보의 입력·총비용·가중치·사람 비용을 넘겨준다 |
 | `motion.py` | 사람의 참 움직임: 정면 접근, 경로 가로지르기, 오다가 되돌아가기 |
 | `metrics.py` | 최소 이격, 이격 시계열, 도달 시간, ESS, 명령 변화량, 경로 길이, 회피 시작 시각 |
 | `plot.py` | 그림 스타일(01~13과 같음), 평면 사람 그리기, 방향-질량 극좌표 |
